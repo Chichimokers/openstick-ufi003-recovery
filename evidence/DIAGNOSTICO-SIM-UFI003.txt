@@ -1,0 +1,180 @@
+===================================================================
+ DIAGNÓSTICO — MÓDEM Y SIM | OpenStick UFI003-CT-PRX-V1.0
+===================================================================
+Fecha: 12-nov-2026 | Modalidad: SOLO LECTURA (no se modificó nada)
+SoC: Qualcomm MSM8916 | Kernel: 6.12.49-msm8916-g93a71ee9468d
+Firmware banda base: UFI003_CT 20211210
+
+-------------------------------------------------------------------
+A. ESTADO GENERAL
+-------------------------------------------------------------------
+Módem (ModemManager /0)   : detectado
+Firmware de banda base    : UFI003_CT 20211210 1 [Nov 04 2016]
+remoteproc0 (MBA/MPSS)    : running
+remoteproc1 (WCNSS)       : running
+Comunicación BAM-DMUX     : activa (dmesg: wwan wwan0: port wwan0qmi0 attached)
+Puertos                   : /dev/wwan0, /dev/wwan0at0, /dev/wwan0at1, /dev/wwan0qmi0
+QMI                       : OPERATIVO (responde; antes: endpoint hangup)
+ModemManager state        : failed / sim-missing / power state: off
+SIM                       : NO detectada (AT: +CME ERROR 10; QMI: no-atr-received)
+
+dmesg (extracto):
+  remoteproc remoteproc0: Booting fw image mba.mbn, size 230272
+  qcom-q6v5-mss 4080000.remoteproc: MBA booted without debug policy, loading mpss
+  wwan wwan0: port wwan0at0 attached / wwan0at1 attached / wwan0qmi0 attached
+  (sin líneas "no-atr" ni errores de SIM en el kernel)
+
+-------------------------------------------------------------------
+B. DIAGNÓSTICO POR COMPONENTES
+-------------------------------------------------------------------
+1. Alimentación del módem ............ OK
+   Evidencia: remoteproc0/1 running, MBA(230272) y MPSS cargados, puertos wwan
+   presentes. Sin error.
+
+2. Comunicación AP<->módem (BAM-DMUX)  OK
+   Evidencia: dmesg "wwan wwan0: port ... attached"; QMI responde comandos.
+
+3. Carga de MBA y MPSS ............... OK
+   Evidencia: "Booting fw image mba.mbn, size 230272" (fichero UFI003) y
+   "remote processor 4080000.remoteproc is now up".
+
+4. Firmware UFI003_CT ................ OK
+   Evidencia: firmware revision = UFI003_CT 20211210.
+
+5. Comunicación QMI .................. OK
+   Evidencia: qmicli --uim-get-card-status devuelve estado completo
+   (antes fallaba con "CID allocation failed / endpoint hangup").
+   AT (+AT) devuelve "OK" por /dev/wwan0at0.
+
+6. Alimentación de la tarjeta SIM ... FALLO DETECTADO
+   Evidencia: GPIO real leído por /sys/kernel/debug/gpio:
+     gpio0 (sim:sel2) = out low
+     gpio1 (sim:en)   = out low   <-- alimentación/enable del slot INACTIVA
+     gpio2 (sim:sel)  = out high
+     gpio3 (sim:en2)  = out low
+   El DTB activo NO define los nodos sim:*, por tanto nadie activa gpio1.
+
+7. Selección de SIM .................. gpio2 (sim:sel) = high -> slot 1 seleccionado.
+
+8. Detección eléctrica de tarjeta ..... SIN ATR
+   Evidencia: QMI "Card state: error: no-atr-received (3)".
+
+9. Lectura del ATR ................... FALLO
+   Evidencia: QMI no-atr-received (3); AT+CPIN? -> +CME ERROR: 10
+   (3GPP TS 27.007: "SIM not inserted").
+
+10. UIM / ModemManager ................ FUNCIONAL
+    Evidencia: el servicio UIM responde y devuelve el estado de la tarjeta
+    (mejoró respecto al firmware UZ801, donde colgaba).
+
+-------------------------------------------------------------------
+C. DIAGNÓSTICO DE LA SIM (causa concreta)
+-------------------------------------------------------------------
+Descarte por componentes:
+- SIM físicamente ausente: NO DESCARTABLE (AT+CPIN? = ERROR 10).
+  Comprobar insertando una tarjeta.
+
+- Alimentación de la SIM: CAUSA MÁS PROBABLE.
+  GPIO1 (sim:en) está en LOW y nadie lo gobierna: el Device Tree en uso
+  no contiene los LEDs/GPIO de SIM. Sin alimentación el lector no entrega ATR.
+
+- Selección de SIM: correcta (gpio2 alto => slot 1).
+
+- GPIO de detección: los GPIO de detección de presencia no están definidos en
+  el DTB (no hay nodo "sim" en /proc/device-tree).
+
+- ATR: ausente por lo anterior.
+
+- Comunicación UIM: correcta (el servicio QMI-UIM responde).
+
+- Firmware: correcto (UFI003_CT, no UZ801, no genérico).
+
+RESUMEN: el fallo NO está en el módem ni en el firmware de banda base.
+Está en la ALIMENTACIÓN/SELECCIÓN del slot SIM, gobernada por GPIO
+(gpio1 sim:en) que el Device Tree actual no controla.
+
+-------------------------------------------------------------------
+D. CAUSA MÁS PROBABLE (ordenada por evidencia, sin afirmar hechos)
+-------------------------------------------------------------------
+Hipótesis 1 (evidencia fuerte): falta de alimentación del slot SIM.
+  Prueba: GPIO1/sim:en = out low y ausencia de nodos sim:* en el DTB.
+  El DTB original del equipo SÍ los define (ver punto H).
+
+Hipótesis 2: no hay tarjeta insertada.
+  Prueba: AT+CPIN? = ERROR 10.
+  Acción: insertar tarjeta y repetir.
+
+Hipótesis 3: contacto mecánico/slot dañado.
+  Sin evidencia todavía; se evalúa descartando H1 y H2.
+
+Hipótesis 4: detección eléctrica real con tarjeta presente pero sin ATR por
+  configuración de voltaje/reloj del lector (UIM).
+  Sin evidencia todavía.
+
+-------------------------------------------------------------------
+H. HALLAZGO DECISIVO (comparación de Device Trees)
+-------------------------------------------------------------------
+DTB activo ahora (instalado desde GitHub "KyonLi/ufi003-kernel"):
+  model/compatible: "UFI003 4G Modem Stick" / "thwc,ufi003"
+  DTS revisado: arch/arm64/boot/dts/qcom/msm8916-thwc-ufi003.dts y
+                msm8916-ufi003.dtsi
+  -> NO contiene nodos sim:en, sim:sel, sim:en2, sim:sel2.
+  -> /sys/class/leds no tiene sim:* (solo blue:, green:wan, mmc0::, red:)
+
+DTB de la imagen de arranque ORIGINAL del equipo (backup C:\UFI003\backup\
+  boot-orig-5.15.img, 64 MB, imagen ANDROID!):
+  contiene las cadenas "sim:en" (x2) y "sim:sel" (x2) -> esos GPIO existían.
+  model: "Handsome Openstick", compatible: "handsome,openstick".
+  Origen: OpenStick/linux, archivo
+  arch/arm64/boot/dts/qcom/msm8916-handsome-openstick-ufi001c.dts, donde:
+      sim_sel  { label = "sim:sel";  gpios = <&msmgpio 2 GPIO_ACTIVE_HIGH>; default-state = "on";  }
+      sim_en   { label = "sim:en";   gpios = <&msmgpio 1 GPIO_ACTIVE_HIGH>; default-state = "off"; }
+      sim_sel2 { label = "sim:sel2"; gpios = <&msmgpio 0 GPIO_ACTIVE_HIGH>; default-state = "off"; }
+      sim_en2  { label = "sim:en2";  gpios = <&msmgpio 3 GPIO_ACTIVE_HIGH>; default-state = "off"; }
+
+CONCLUSIÓN TÉCNICA: la tarjeta SIM se alimenta/selecta por GPIO en esta
+placa; el DTB "thwc,ufi003" no declara esos GPIO, por lo que gpio1
+(sim:en) queda en LOW y no se entrega ATR ni con tarjeta insertada.
+
+-------------------------------------------------------------------
+E. SOLUCIÓN PROPUESTA (requiere decisión del usuario; aquí NO se aplica)
+-------------------------------------------------------------------
+Opción 1 — Restaurar la partición boot original (kernel 5.15 + DTB con GPIO):
+  Comando en Windows (PowerShell, C:\UFI003):
+    adb push C:\UFI003\backup\boot-orig-5.15.img /root/
+    adb shell "dd if=/root/boot-orig-5.15.img of=/dev/disk/by-partlabel/boot bs=1M conv=fsync"
+    adb reboot
+  Efecto: vuelven los nodos sim:* y la alimentación del slot.
+  Coste: se pierde el kernel 6.12.49 (vuelve 5.15.0-handsomekernel+).
+
+Opción 2 — Compilar un boot.img 6.12 con el DTB correcto (recomendada):
+  Repos: kernel KyonLi/ufi003-kernel + DTS msm8916-handsome-openstick-ufi001c.dts
+  Pasos: añadir/activar los 4 nodos sim:* en el DTS de la placa, compilar,
+  empaquetar boot.img (mkbootimg) y escribirlo en la partición boot.
+  Efecto: conserva Debian 11 y el kernel 6.12 y recupera el control del SIM.
+
+Opción 3 — Activar el GPIO desde espacio de usuario (sin tocar el DTB):
+  Exportar GPIO1 y forzar valor alto. ADB root:
+    adb shell "echo 1 > /sys/class/gpio/export 2>/dev/null; echo out > /sys/class/gpio/gpio1/direction; echo 1 > /sys/class/gpio/gpio1/value"
+  Limitación: el pinctrl puede rechazar el cambio y no sobrevive al reinicio.
+  (No ejecutado aquí: el diagnóstico es de solo lectura.)
+
+Opción 4 — Verificar primero la ausencia física de tarjeta (Hipótesis 2):
+    adb shell "qmicli -d /dev/wwan0qmi0 --uim-get-card-status; mmcli -m 0"
+  tras insertar una SIM conocida-buena.
+
+Archivos que se modificarían (según opción elegida):
+  /dev/disk/by-partlabel/boot   (partición de arranque; 64 MB)
+  NO se tocan: modemst1, modemst2, fsg, fsc, persist, NV, IMEI.
+
+-------------------------------------------------------------------
+F. PRUEBAS NO REALIZADAS / LIMITACIONES
+-------------------------------------------------------------------
+- No se insertó una tarjeta SIM física (no disponible durante el diagnóstico),
+  por lo que la Hipótesis 2 no pudo cerrarse.
+- /sys/class/gpio no está exportado por defecto (sysfs sin gpio reservados),
+  la lectura del nivel real se hizo por /sys/kernel/debug/gpio.
+- No se dispone de documentación pública específica de la revisión
+  "UFI003-CT-PRX-V1.0"; la comparación se hizo contra el DTS UFI001C de
+  OpenStick, que es el que coincide con los GPIO observados.
+- No se modificó GPIO, brightness, remoteproc, firmware ni particiones.
